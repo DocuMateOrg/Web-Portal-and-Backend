@@ -1,6 +1,8 @@
 const express = require("express");
 const router = express.Router();
 const db = require("../db");
+const { body, validationResult, query } = require('express-validator');
+const slugify = require('slugify');
 
 // Helpers for tags
 async function getOrCreateTag(name) {
@@ -89,13 +91,37 @@ router.get('/search/by-tag/:tag', async (req, res) => {
 });
 
 // Save extracted text, summary and tags in one request
-router.post('/:id/process', async (req, res) => {
+// Validation middleware for process endpoint
+const processValidation = [
+  body('extractedText').optional().isString(),
+  body('summary').optional().isString(),
+  body('tags').optional().isArray(),
+  body('tags.*').optional().isString()
+];
+
+router.post('/:id/process', processValidation, async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
   const { extractedText, summary, tags } = req.body;
   try {
-    // Update extracted text and summary
+    // Ensure document exists
+    const docRes = await db.query('SELECT id, filename, slug FROM documents WHERE id=$1', [req.params.id]);
+    if (!docRes.rows.length) return res.status(404).json({ error: 'Document not found' });
+
+    const doc = docRes.rows[0];
+
+    // Generate slug if missing
+    let slug = doc.slug;
+    if (!slug || slug.trim() === '') {
+      const filename = doc.filename || `doc-${req.params.id}`;
+      slug = slugify(filename, { lower: true, strict: true });
+    }
+
+    // Update extracted text and summary, set slug
     await db.query(
-      'UPDATE documents SET extracted_text=$1, summary=$2, status=$3 WHERE id=$4',
-      [extractedText || null, summary || null, 'processed', req.params.id]
+      'UPDATE documents SET extracted_text=$1, summary=$2, status=$3, slug=$4 WHERE id=$5',
+      [extractedText || null, summary || null, 'processed', slug, req.params.id]
     );
 
     // Handle tags (optional)
@@ -109,9 +135,30 @@ router.post('/:id/process', async (req, res) => {
       }
     }
 
-    res.json({ message: 'Document processed' });
+    res.json({ message: 'Document processed', id: req.params.id, slug });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to process document' });
+  }
+});
+
+// Full-text search endpoint
+router.get('/search', [ query('q').isString().notEmpty() ], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+  const q = req.query.q;
+  try {
+    // Use plainto_tsquery for safer input
+    const result = await db.query(
+      `SELECT id, filename, summary, ts_rank_cd(search_vector, plainto_tsquery('english', $1)) AS rank
+       FROM documents WHERE search_vector @@ plainto_tsquery('english', $1)
+       ORDER BY rank DESC LIMIT 50`,
+      [q]
+    );
+    res.json({ results: result.rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Search failed' });
   }
 });
