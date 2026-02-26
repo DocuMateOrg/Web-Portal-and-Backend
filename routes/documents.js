@@ -87,3 +87,31 @@ router.get('/search/by-tag/:tag', async (req, res) => {
   );
   res.json({ documents: result.rows });
 });
+
+// Save extracted text, summary and tags in one request
+router.post('/:id/process', async (req, res) => {
+  const { extractedText, summary, tags } = req.body;
+  try {
+    // Update extracted text and summary
+    await db.query(
+      'UPDATE documents SET extracted_text=$1, summary=$2, status=$3 WHERE id=$4',
+      [extractedText || null, summary || null, 'processed', req.params.id]
+    );
+
+    // Handle tags (optional)
+    if (Array.isArray(tags) && tags.length) {
+      for (const t of tags) {
+        const tagId = await getOrCreateTag(t.trim().toLowerCase());
+        await db.query(
+          'INSERT INTO document_tags(document_id, tag_id) VALUES($1,$2) ON CONFLICT DO NOTHING',
+          [req.params.id, tagId]
+        );
+      }
+    }
+
+    res.json({ message: 'Document processed' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to process document' });
+  }
+});
