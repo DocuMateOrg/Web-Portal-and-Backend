@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const db = require("../db");
+const { indexDocument } = require('../services/elastic');
 const { body, validationResult, query } = require('express-validator');
 const slugify = require('slugify');
 
@@ -22,6 +23,17 @@ router.post("/upload", async (req, res) => {
   );
 
   res.json(result.rows[0]);
+  // index minimal document in elastic
+  try {
+    await indexDocument(result.rows[0].id, {
+      filename: result.rows[0].filename,
+      summary: result.rows[0].summary || null,
+      extracted_text: result.rows[0].extracted_text || null,
+      tags: []
+    });
+  } catch (err) {
+    console.error('Elastic index error (upload):', err.message || err);
+  }
 });
 
 router.put("/:id/trash", async (req, res) => {
@@ -135,6 +147,24 @@ router.post('/:id/process', processValidation, async (req, res) => {
       }
     }
 
+    // index the updated document in elastic
+    try {
+      // fetch latest tags
+      const tagsRes = await db.query(
+        `SELECT t.name FROM tags t JOIN document_tags dt ON dt.tag_id = t.id WHERE dt.document_id=$1`,
+        [req.params.id]
+      );
+      const tagNames = tagsRes.rows.map(r => r.name);
+      await indexDocument(req.params.id, {
+        filename: doc.filename,
+        summary: summary || null,
+        extracted_text: extractedText || null,
+        tags: tagNames
+      });
+    } catch (err) {
+      console.error('Elastic index error (process):', err.message || err);
+    }
+
     res.json({ message: 'Document processed', id: req.params.id, slug });
   } catch (err) {
     console.error(err);
@@ -162,3 +192,33 @@ router.get('/search', [ query('q').isString().notEmpty() ], async (req, res) => 
     res.status(500).json({ error: 'Search failed' });
   }
 });
+
+  // Elastic search endpoint
+  router.get('/es-search', [ query('q').isString().notEmpty() ], async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+    const q = req.query.q;
+    try {
+      const { client } = require('../services/elastic');
+      const esRes = await client.search({
+        index: process.env.ELASTIC_INDEX || 'documents',
+        body: {
+          query: {
+            multi_match: {
+              query: q,
+              fields: ['summary^2','extracted_text']
+            }
+          }
+        }
+      });
+
+      const hits = (esRes.hits && esRes.hits.hits) ? esRes.hits.hits.map(h => ({ id: h._id, score: h._score, ...h._source })) : [];
+      res.json({ results: hits });
+    } catch (err) {
+      console.error('Elastic search error', err);
+      res.status(500).json({ error: 'Search failed' });
+    }
+  });
+
+  module.exports = router;
