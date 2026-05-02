@@ -213,6 +213,70 @@ router.get('/search', [ query('q').isString().notEmpty() ], async (req, res) => 
         }
       });
 
+      // ES keyword search (exact / keyword fields)
+      // GET /api/documents/es-keyword?term=invoice
+      router.get('/es-keyword', [ query('term').isString().notEmpty() ], async (req, res) => {
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+        const term = req.query.term;
+        try {
+          const { client } = require('../services/elastic');
+          const esRes = await client.search({
+            index: process.env.ELASTIC_INDEX || 'documents',
+            body: {
+              query: {
+                bool: {
+                  should: [
+                    { term: { 'tags': { value: term } } },
+                    { term: { 'filename.keyword': { value: term } } },
+                    { match_phrase: { 'summary': { query: term } } }
+                  ]
+                }
+              }
+            }
+          });
+
+          const hits = (esRes.hits && esRes.hits.hits) ? esRes.hits.hits.map(h => ({ id: h._id, score: h._score, ...h._source })) : [];
+          res.json({ results: hits });
+        } catch (err) {
+          console.error('Elastic keyword search error', err);
+          res.status(500).json({ error: 'Search failed' });
+        }
+      });
+
+      // ES fuzzy search (approximate matching)
+      // GET /api/documents/es-fuzzy?q=invocie&fuzziness=1
+      router.get('/es-fuzzy', [ query('q').isString().notEmpty(), query('fuzziness').optional() ], async (req, res) => {
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+        const q = req.query.q;
+        const fuzziness = req.query.fuzziness || 'AUTO';
+        try {
+          const { client } = require('../services/elastic');
+          const esRes = await client.search({
+            index: process.env.ELASTIC_INDEX || 'documents',
+            body: {
+              query: {
+                multi_match: {
+                  query: q,
+                  fields: ['summary^2','extracted_text'],
+                  fuzziness: fuzziness,
+                  operator: 'and'
+                }
+              }
+            }
+          });
+
+          const hits = (esRes.hits && esRes.hits.hits) ? esRes.hits.hits.map(h => ({ id: h._id, score: h._score, ...h._source })) : [];
+          res.json({ results: hits });
+        } catch (err) {
+          console.error('Elastic fuzzy search error', err);
+          res.status(500).json({ error: 'Search failed' });
+        }
+      });
+
       const hits = (esRes.hits && esRes.hits.hits) ? esRes.hits.hits.map(h => ({ id: h._id, score: h._score, ...h._source })) : [];
       res.json({ results: hits });
     } catch (err) {
