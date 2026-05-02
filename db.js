@@ -9,6 +9,8 @@ const storageRoutes = require("./routes/storage");
 app.use("/api/storage", storageRoutes);
 const ocrRoutes = require("./routes/ocr");
 app.use("/api/ocr", ocrRoutes);
+const convertRoutes = require('./routes/convert');
+app.use('/api/convert', convertRoutes);
 
 app.listen(3000, () => {
   console.log("Server running on port 3000");
