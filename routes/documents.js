@@ -222,3 +222,48 @@ router.get('/search', [ query('q').isString().notEmpty() ], async (req, res) => 
   });
 
   module.exports = router;
+
+  // --- Batch summary endpoint ---
+  // POST /api/documents/batch-summary
+  // body: { ids: number[], maxSentences?: number }
+  router.post('/batch-summary', [ body('ids').isArray({ min: 1 }), body('maxSentences').optional().isInt({ min: 1, max: 10 }) ], async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+    const ids = req.body.ids;
+    const maxSentences = req.body.maxSentences || 3;
+
+    const results = [];
+
+    for (const id of ids) {
+      try {
+        const docRes = await db.query('SELECT extracted_text, filename FROM documents WHERE id=$1', [id]);
+        if (!docRes.rows.length) {
+          results.push({ id, ok: false, error: 'Document not found' });
+          continue;
+        }
+        const text = docRes.rows[0].extracted_text || '';
+
+        // naive sentence splitter: split on .!?\n and take first N sentences
+        const sentences = text.split(/(?<=[.!?])\s+|\n+/).filter(s => s && s.trim());
+        const summary = sentences.slice(0, maxSentences).join(' ').trim();
+
+        // update db
+        await db.query('UPDATE documents SET summary=$1, status=$2 WHERE id=$3', [summary || null, 'processed', id]);
+
+        // index in elastic
+        try {
+          await indexDocument(id, { filename: docRes.rows[0].filename, summary: summary || null, extracted_text: text || null, tags: [] });
+        } catch (e) {
+          console.error('Elastic index error (batch)', e.message || e);
+        }
+
+        results.push({ id, ok: true, summary });
+      } catch (err) {
+        console.error('Batch summary error for id', id, err);
+        results.push({ id, ok: false, error: err.message });
+      }
+    }
+
+    res.json({ results });
+  });
