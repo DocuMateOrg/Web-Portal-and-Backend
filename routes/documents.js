@@ -13,7 +13,9 @@ async function getOrCreateTag(name) {
   return insert.rows[0].id;
 }
 
-router.post("/upload", async (req, res) => {
+const requirePerm = require('../middleware/permissions');
+
+router.post("/upload", requirePerm('upload'), async (req, res) => {
   const { filename, fileUrl, groupId, uploaderId } = req.body;
 
   const result = await db.query(
@@ -111,7 +113,7 @@ const processValidation = [
   body('tags.*').optional().isString()
 ];
 
-router.post('/:id/process', processValidation, async (req, res) => {
+router.post('/:id/process', requirePerm('process'), processValidation, async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
